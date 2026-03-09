@@ -8,6 +8,8 @@ from urllib.parse import urljoin, urlparse
 
 import subliminal
 from babelfish import Language
+from bs4 import BeautifulSoup
+
 
 DOWNLOAD_DIR = "downloads"
 CHUNK_SIZE = 4 * 1024 * 1024
@@ -18,6 +20,7 @@ HEADERS = {
 }
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
 
 # =====================================================
 # ORDENAÇÃO NATURAL
@@ -31,7 +34,7 @@ def natural_sort_key(s):
 
 
 # =====================================================
-# SOFTSUB (MUX LEGENDA)
+# SOFTSUB (LEGENDA PT-BR)
 # =====================================================
 
 def softsub(video_path):
@@ -44,6 +47,9 @@ def softsub(video_path):
             [video],
             {Language("por", "BR")}
         )
+
+        if not subtitles:
+            return video_path
 
         subliminal.save_subtitles(video, subtitles[video])
 
@@ -76,8 +82,10 @@ def softsub(video_path):
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         if os.path.exists(output):
+
             os.remove(video_path)
             os.remove(subtitle)
+
             return output
 
         return video_path
@@ -87,12 +95,47 @@ def softsub(video_path):
 
 
 # =====================================================
-# TORRENT DOWNLOAD
+# BUSCAR TORRENT NO NYAA
+# =====================================================
+
+async def search_nyaa(query):
+
+    url = f"https://nyaa.si/?f=0&c=1_2&s=seeders&o=desc&q={query}"
+
+    async with aiohttp.ClientSession(headers=HEADERS) as session:
+
+        async with session.get(url) as resp:
+
+            if resp.status != 200:
+                raise Exception("Erro ao buscar no Nyaa")
+
+            html = await resp.text()
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    rows = soup.select("table tbody tr")
+
+    if not rows:
+        raise Exception("Nenhum torrent encontrado")
+
+    for row in rows:
+
+        magnet = row.find("a", href=lambda x: x and x.startswith("magnet:"))
+
+        if magnet:
+            return magnet["href"]
+
+    raise Exception("Magnet não encontrado")
+
+
+# =====================================================
+# TORRENT DOWNLOAD (ARIA2)
 # =====================================================
 
 async def download_torrent(url):
 
     folder = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4()))
+
     os.makedirs(folder, exist_ok=True)
 
     cmd = [
@@ -101,21 +144,26 @@ async def download_torrent(url):
         "--seed-time=0",
         "--max-connection-per-server=16",
         "--split=16",
+        "--min-split-size=1M",
+        "--file-allocation=none",
         url
     ]
 
     process = await asyncio.create_subprocess_exec(*cmd)
+
     await process.wait()
 
     files = []
 
     for root, _, filenames in os.walk(folder):
+
         for f in filenames:
+
             if f.lower().endswith((".mp4", ".mkv")):
                 files.append(os.path.join(root, f))
 
     if not files:
-        raise Exception("Torrent baixado mas nenhum vídeo encontrado.")
+        raise Exception("Torrent baixado mas nenhum vídeo encontrado")
 
     files.sort(key=natural_sort_key)
 
@@ -136,7 +184,7 @@ async def extract_all_videos_from_folder(url):
         async with session.get(url) as resp:
 
             if resp.status != 200:
-                raise Exception("Não foi possível acessar a pasta.")
+                raise Exception("Não foi possível acessar a pasta")
 
             html = await resp.text(encoding="utf-8", errors="ignore")
 
@@ -145,12 +193,15 @@ async def extract_all_videos_from_folder(url):
     video_links = []
 
     for link in links:
+
         if link.lower().endswith(VIDEO_EXTENSIONS):
+
             full_link = urljoin(url, link)
+
             video_links.append(full_link)
 
     if not video_links:
-        raise Exception("Nenhum vídeo encontrado.")
+        raise Exception("Nenhum vídeo encontrado")
 
     video_links.sort(key=natural_sort_key)
 
@@ -177,20 +228,26 @@ async def download_direct(url, progress_callback=None):
             content_disposition = resp.headers.get("Content-Disposition")
 
             if content_disposition:
+
                 match = re.findall('filename="?([^"]+)"?', content_disposition)
+
                 if match:
                     filename = match[0]
 
             if not filename:
+
                 parsed = urlparse(str(resp.url))
+
                 filename = os.path.basename(parsed.path)
 
             if not filename or "." not in filename:
+
                 filename = str(uuid.uuid4()) + ".mp4"
 
             output_path = os.path.join(DOWNLOAD_DIR, filename)
 
             total = int(resp.headers.get("content-length", 0) or 0)
+
             downloaded = 0
             last_percent = 0
 
@@ -207,7 +264,9 @@ async def download_direct(url, progress_callback=None):
                         percent = (downloaded / total) * 100
 
                         if percent - last_percent >= 5:
+
                             last_percent = percent
+
                             await progress_callback(round(percent, 1))
 
     return softsub(output_path)
@@ -241,13 +300,13 @@ async def download_m3u8(url):
     await process.wait()
 
     if process.returncode != 0:
-        raise Exception("Erro ao converter m3u8.")
+        raise Exception("Erro ao converter m3u8")
 
     return softsub(output_path)
 
 
 # =====================================================
-# FALLBACK YT-DLP
+# FALLBACK UNIVERSAL (YT-DLP)
 # =====================================================
 
 async def download_with_ytdlp(url):
@@ -267,7 +326,7 @@ async def download_with_ytdlp(url):
     await process.wait()
 
     if process.returncode != 0:
-        raise Exception("Erro ao baixar com yt-dlp.")
+        raise Exception("Erro ao baixar com yt-dlp")
 
     files = sorted(
         [os.path.join(DOWNLOAD_DIR, f) for f in os.listdir(DOWNLOAD_DIR)],
@@ -285,13 +344,27 @@ async def process_link(url, progress_callback=None):
 
     url_lower = url.lower()
 
+    # 🔎 BUSCA AUTOMÁTICA NYAA
+    if not url_lower.startswith(("http://", "https://", "magnet:")):
+
+        magnet = await search_nyaa(url)
+
+        return await download_torrent(magnet)
+
+    # TORRENT
     if url_lower.startswith("magnet:") or url_lower.endswith(".torrent"):
+
         return await download_torrent(url)
 
+    # M3U8
     if url_lower.endswith(".m3u8"):
+
         return await download_m3u8(url)
 
+    # VIDEO DIRETO
     if url_lower.endswith((".mp4", ".mkv")):
+
         return await download_direct(url, progress_callback)
 
+    # FALLBACK FINAL
     return await download_with_ytdlp(url)
