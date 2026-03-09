@@ -250,7 +250,7 @@ def main():
         .build()
     )
 
-    app.add_handler(CommandHandler("an", anime_handler))
+    app.add_handler(CommandHandler("an1", anime_handler))
 
     print("🚀 Bot iniciado...")
     app.run_polling(
