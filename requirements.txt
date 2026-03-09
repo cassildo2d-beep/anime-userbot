@@ -4,3 +4,6 @@ tgcrypto
 aiohttp
 aiofiles
 yt-dlp
+subliminal
+babelfish
+guessit
