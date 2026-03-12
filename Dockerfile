@@ -1,9 +1,8 @@
 FROM python:3.11-slim
 
-# Instalar ffmpeg, aria2 e dependências
+# Instalar ffmpeg e dependências
 RUN apt-get update && apt-get install -y \
     ffmpeg \
-    aria2 \
     gcc \
     libffi-dev \
     ca-certificates \
