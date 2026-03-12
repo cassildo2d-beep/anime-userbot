@@ -190,7 +190,7 @@ async def anime_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not context.args:
-        await update.message.reply_text("Use:\n/an link")
+        await update.message.reply_text("Use:\n/ani link")
         return
 
     url = context.args[0]
@@ -250,7 +250,7 @@ def main():
         .build()
     )
 
-    app.add_handler(CommandHandler("an", anime_handler))
+    app.add_handler(CommandHandler("ani", anime_handler))
 
     print("🚀 Bot iniciado...")
     app.run_polling(
