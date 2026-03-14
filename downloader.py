@@ -3,8 +3,8 @@ import asyncio
 import aiohttp
 import re
 import uuid
+import gdown
 from urllib.parse import urljoin, urlparse
-from bs4 import BeautifulSoup
 
 DOWNLOAD_DIR = "downloads"
 CHUNK_SIZE = 4 * 1024 * 1024
@@ -17,7 +17,7 @@ HEADERS = {
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 # =====================================================
-# ORDENAÇÃO NATURAL (ep1, ep2, ep10 correto)
+# ORDENAÇÃO NATURAL
 # =====================================================
 
 def natural_sort_key(s):
@@ -27,54 +27,50 @@ def natural_sort_key(s):
     ]
 
 # =====================================================
-# EXTRAÇÃO ANIMEFIRE
+# GOOGLE DRIVE
 # =====================================================
 
-async def extract_animefire_video(url):
+def extract_drive_folder_id(url):
+    match = re.search(r'folders/([a-zA-Z0-9_-]+)', url)
+    if match:
+        return match.group(1)
+    raise Exception("Folder ID do Google Drive não encontrado.")
 
-    match = re.search(r"/animes/([^/]+)/(\d+)", url)
 
-    if not match:
-        raise Exception("Link AnimeFire inválido")
+async def process_drive_folder(folder_id, progress_callback=None):
 
-    anime = match.group(1)
-    episode = match.group(2)
+    items = gdown._list_folder(folder_id)
 
-    download_page = f"https://animefire.plus/download/{anime}/{episode}"
+    results = []
 
-    async with aiohttp.ClientSession(headers=HEADERS) as session:
-        async with session.get(download_page) as resp:
+    for item in items:
 
-            if resp.status != 200:
-                raise Exception("Não foi possível acessar página de download")
+        name = item["name"]
+        file_id = item["id"]
+        mime = item["mimeType"]
 
-            html = await resp.text()
+        # Se for pasta → entrar nela
+        if mime == "application/vnd.google-apps.folder":
 
-    soup = BeautifulSoup(html, "html.parser")
+            sub = await process_drive_folder(file_id, progress_callback)
+            results.extend(sub)
 
-    qualities = {}
+        else:
 
-    for a in soup.find_all("a", href=True):
+            url = f"https://drive.google.com/uc?id={file_id}"
+            output_path = os.path.join(DOWNLOAD_DIR, name)
 
-        text = a.text.strip().lower()
+            loop = asyncio.get_event_loop()
 
-        if "full" in text:
-            qualities["full"] = a["href"]
+            await loop.run_in_executor(
+                None,
+                lambda: gdown.download(url, output_path, quiet=False)
+            )
 
-        elif "hd" in text:
-            qualities["hd"] = a["href"]
+            results.append(output_path)
 
-        elif "sd" in text:
-            qualities["sd"] = a["href"]
+    return results
 
-    if not qualities:
-        raise Exception("Nenhum vídeo encontrado no AnimeFire")
-
-    for q in ["full", "hd", "sd"]:
-        if q in qualities:
-            return qualities[q]
-
-    return list(qualities.values())[0]
 
 # =====================================================
 # EXTRAIR VÍDEOS DE PASTA HTML
@@ -102,16 +98,16 @@ async def extract_all_videos_from_folder(url):
     for link in links:
 
         if link.lower().endswith(VIDEO_EXTENSIONS):
-
             full_link = urljoin(url, link)
             video_links.append(full_link)
 
     if not video_links:
-        raise Exception("Nenhum vídeo encontrado na pasta.")
+        raise Exception("Nenhum vídeo encontrado.")
 
     video_links.sort(key=natural_sort_key)
 
     return video_links
+
 
 # =====================================================
 # DOWNLOAD DIRETO
@@ -122,7 +118,6 @@ async def download_direct(url, progress_callback=None):
     timeout = aiohttp.ClientTimeout(total=None)
 
     async with aiohttp.ClientSession(timeout=timeout, headers=HEADERS) as session:
-
         async with session.get(url, allow_redirects=True) as resp:
 
             if resp.status != 200:
@@ -134,17 +129,15 @@ async def download_direct(url, progress_callback=None):
                 raise Exception("Servidor retornou HTML inesperado.")
 
             filename = None
+
             content_disposition = resp.headers.get("Content-Disposition")
 
             if content_disposition:
-
                 match = re.findall('filename="?([^"]+)"?', content_disposition)
-
                 if match:
                     filename = match[0]
 
             if not filename:
-
                 parsed = urlparse(str(resp.url))
                 filename = os.path.basename(parsed.path)
 
@@ -154,6 +147,7 @@ async def download_direct(url, progress_callback=None):
             output_path = os.path.join(DOWNLOAD_DIR, filename)
 
             total = int(resp.headers.get("content-length", 0) or 0)
+
             downloaded = 0
             last_percent = 0
 
@@ -169,11 +163,11 @@ async def download_direct(url, progress_callback=None):
                         percent = (downloaded / total) * 100
 
                         if percent - last_percent >= 5:
-
                             last_percent = percent
                             await progress_callback(round(percent, 1))
 
     return output_path
+
 
 # =====================================================
 # DOWNLOAD M3U8
@@ -182,6 +176,7 @@ async def download_direct(url, progress_callback=None):
 async def download_m3u8(url):
 
     filename = str(uuid.uuid4()) + ".mp4"
+
     output_path = os.path.join(DOWNLOAD_DIR, filename)
 
     cmd = [
@@ -206,8 +201,9 @@ async def download_m3u8(url):
 
     return output_path
 
+
 # =====================================================
-# FALLBACK YT-DLP
+# FALLBACK UNIVERSAL
 # =====================================================
 
 async def download_with_ytdlp(url):
@@ -217,8 +213,7 @@ async def download_with_ytdlp(url):
     cmd = [
         "yt-dlp",
         "--no-playlist",
-        "-o",
-        output_template,
+        "-o", output_template,
         url
     ]
 
@@ -239,6 +234,7 @@ async def download_with_ytdlp(url):
 
     return files[-1]
 
+
 # =====================================================
 # FUNÇÃO PRINCIPAL
 # =====================================================
@@ -247,34 +243,24 @@ async def process_link(url, progress_callback=None):
 
     url_lower = url.lower()
 
-    # =====================================================
-    # DETECTAR ANIMEFIRE
-    # =====================================================
+    # GOOGLE DRIVE
+    if "drive.google.com" in url_lower and "folders" in url_lower:
 
-    if "animefire" in url_lower:
+        folder_id = extract_drive_folder_id(url)
 
-        video_url = await extract_animefire_video(url)
+        return await process_drive_folder(folder_id, progress_callback)
 
-        return await download_direct(video_url, progress_callback)
-
-    # =====================================================
     # EXTENSÃO DIRETA
-    # =====================================================
-
     if url_lower.endswith(".m3u8"):
         return await download_m3u8(url)
 
     if url_lower.endswith((".mp4", ".mkv")):
         return await download_direct(url, progress_callback)
 
-    # =====================================================
     # TESTE HEAD
-    # =====================================================
-
     try:
 
         async with aiohttp.ClientSession(headers=HEADERS) as session:
-
             async with session.head(url, allow_redirects=True) as resp:
 
                 content_type = resp.headers.get("content-type", "")
@@ -285,26 +271,20 @@ async def process_link(url, progress_callback=None):
                     or "octet-stream" in content_type
                     or "attachment" in content_disp
                 ):
-
                     return await download_direct(url, progress_callback)
 
     except:
         pass
 
-    # =====================================================
     # TESTE HTML
-    # =====================================================
-
     try:
 
         async with aiohttp.ClientSession(headers=HEADERS) as session:
-
             async with session.get(url) as resp:
 
                 content_type = resp.headers.get("content-type", "")
 
                 if any(x in content_type for x in ["video", "octet-stream"]):
-
                     return await download_direct(url, progress_callback)
 
                 if "text/html" in content_type:
@@ -319,10 +299,7 @@ async def process_link(url, progress_callback=None):
 
                         for video_url in video_links:
 
-                            result = await process_link(
-                                video_url,
-                                progress_callback
-                            )
+                            result = await process_link(video_url, progress_callback)
 
                             results.append(result)
 
@@ -331,8 +308,5 @@ async def process_link(url, progress_callback=None):
     except:
         pass
 
-    # =====================================================
     # FALLBACK FINAL
-    # =====================================================
-
     return await download_with_ytdlp(url)
